@@ -1,0 +1,2 @@
+This is a libmicrohttpd HTTP server wrapped in a GObject.
+Also includes support for serving JSON data.
