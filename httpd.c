@@ -878,6 +878,99 @@ json_response(HTTPServer *server, struct MHD_Connection * connection,
   return MHD_YES; 
 }
 
+typedef struct SetArgData SetArgData;
+struct SetArgData
+{
+  HTTPServer *server;
+  gchar *path;
+};
+
+static int set_arg_iterator(void *cls, enum MHD_ValueKind kind,
+			    const char *key, const char *value)
+{
+  GError *err = NULL;
+  SetArgData *ctxt = cls;
+  gchar *path = g_strconcat(ctxt->path, "/", key, NULL);
+  JsonNode *node = get_node(ctxt->server, path, &err);
+  if (!node) {
+    g_warning("Failed too lookup value to set: %s", err->message);
+    g_clear_error(&err);
+    return MHD_YES;
+  }
+  switch(JSON_NODE_TYPE(node)) {
+  case JSON_NODE_OBJECT:
+  case JSON_NODE_ARRAY:
+  case JSON_NODE_NULL:
+    g_warning("Trying to set non-value node");
+    break;
+  case JSON_NODE_VALUE:
+    {
+      GValue gvalue = G_VALUE_INIT;
+      switch(json_node_get_value_type(node)) {
+      case G_TYPE_INT64:
+	g_value_init(&gvalue, G_TYPE_INT64);
+	g_value_set_int64(&gvalue, g_ascii_strtoll(value,NULL,0));
+	break;
+      case G_TYPE_DOUBLE:
+	g_value_init(&gvalue, G_TYPE_DOUBLE);
+	g_value_set_double(&gvalue, g_ascii_strtod(value, NULL));
+	break;
+      case G_TYPE_BOOLEAN:
+	g_value_init(&gvalue, G_TYPE_BOOLEAN);
+	/* Only check first character for something that could be
+	   considered false. Anything else is true */
+	g_value_set_boolean(&gvalue, !(*value == '0' || *value== 'f' || *value == 'F'));
+	break;
+      case G_TYPE_STRING:
+	g_value_init(&gvalue, G_TYPE_STRING);
+	g_value_set_string(&gvalue, value);
+	break;
+      }
+      g_assert(!G_VALUE_HOLDS(&gvalue, G_TYPE_INVALID));
+      if (ctxt->server->http_sets_values) {
+	json_node_set_value(node, &gvalue);
+      }
+      pending_change(ctxt->server, path, &gvalue);
+      g_value_unset(&gvalue);
+      
+    }
+    break;
+  }
+  g_free(path);
+  return MHD_YES;
+}
+
+static int
+set_values_response(HTTPServer *server,
+	      struct MHD_Connection * connection, const char *url)
+{
+  JsonNode *root;
+  SetArgData set_ctxt;
+  gsize path_len;
+  set_ctxt.server = server;
+  set_ctxt.path = g_strdup(url);
+  path_len = strlen(set_ctxt.path);
+  /* Trim trailing '/' */
+  if (path_len >= 1 && set_ctxt.path[path_len - 1] == '/') {
+    set_ctxt.path[path_len - 1] = '\0';
+  }
+
+  g_rw_lock_writer_lock(&server->value_lock);
+  root = get_node(server, set_ctxt.path, NULL);
+  if (!root) {
+    g_rw_lock_writer_unlock(&server->value_lock);
+    g_free(set_ctxt.path);
+    return error_response(connection, MHD_HTTP_NOT_FOUND, "Not Found",
+			  "Parent path not found");
+  }
+  
+  MHD_get_connection_values(connection,MHD_GET_ARGUMENT_KIND,
+			    set_arg_iterator,&set_ctxt);
+  g_rw_lock_writer_unlock(&server->value_lock);
+  g_free(set_ctxt.path);
+  return error_response(connection, MHD_HTTP_NO_CONTENT, "No content", NULL);
+}
+
 static int
 values_response(HTTPServer *server,
 	      struct MHD_Connection * connection, const char *url)
@@ -911,6 +1004,11 @@ handle_GET_request(HTTPServer *server, ConnectionContext *cc,
     if (strncmp("values", url, 6) == 0) {
       url+=6;
       if (*url == '/') url++;
+      /* Check if the url has arguments, if so then it's a set request */
+      if (MHD_get_connection_values(connection,MHD_GET_ARGUMENT_KIND,
+				    NULL,NULL) >0) {
+	set_values_response(server, connection, url);
+      }
       return values_response(server, connection, url);
     } else {
       return file_response(server, connection, url);
