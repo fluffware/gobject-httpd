@@ -1138,6 +1138,7 @@ handle_POST_request(HTTPServer *server, ConnectionContext *cc,
     int ret;
     GError *err = NULL;
     JsonNode *node;
+    JsonNode *parsed;
     g_rw_lock_writer_lock(&server->value_lock);
     node = get_node(server, url, &err);
     if (!node) {
@@ -1155,7 +1156,14 @@ handle_POST_request(HTTPServer *server, ConnectionContext *cc,
       return error_response(connection, MHD_HTTP_BAD_REQUEST, "Bad Request",
 			    "Invalid JSON");
     }
-    if (!match_node(json_parser_get_root(server->json_parser) ,node)) {
+    parsed = json_parser_get_root(server->json_parser);
+    if (!parsed) {
+      g_rw_lock_writer_unlock(&server->value_lock);
+      g_clear_error(&err);
+      return error_response(connection, MHD_HTTP_BAD_REQUEST, "Bad Request",
+			    "No JSON data");
+    }
+    if (!match_node(parsed ,node)) {
       g_rw_lock_writer_unlock(&server->value_lock);
       return error_response(connection, MHD_HTTP_NOT_FOUND, "Not Found",
 			    "Value not found");
