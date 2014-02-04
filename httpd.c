@@ -570,7 +570,9 @@ pending_change(HTTPServer *server, const gchar *pathstr, const GValue *value)
   GValue *v = g_new0(GValue,1);
   g_value_init(v, G_VALUE_TYPE(value));
   g_value_copy(value, v);
+  g_mutex_lock(&server->signal_lock);
   g_datalist_set_data_full(&server->pending_changes, pathstr, v, g_value_free);
+  g_mutex_unlock(&server->signal_lock);
 }
 
 static GQuark
