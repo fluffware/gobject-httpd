@@ -43,6 +43,7 @@ enum
   PROP_HTTP_ROOT,
   PROP_ROOT_FILE,
   PROP_HTTP_SETS_VALUES,
+  PROP_HTTP_SETS_EQUAL,
   PROP_USER_CHANGES_SIGNALED,
   N_PROPERTIES
 };
@@ -58,6 +59,7 @@ struct _HTTPServer
   gchar *http_root;
   gchar *root_file; /* File served when accessing the root */
   gboolean http_sets_values;
+  gboolean http_sets_equal;
   gboolean user_changes_signaled;
   
   GRWLock value_lock; /* Protects any access to value_root and its descendants */
@@ -174,6 +176,9 @@ set_property (GObject *object, guint property_id,
     case PROP_HTTP_SETS_VALUES:
       server->http_sets_values = g_value_get_boolean(value);
       break;
+    case PROP_HTTP_SETS_EQUAL:
+      server->http_sets_equal = g_value_get_boolean(value);
+      break;
     case PROP_USER_CHANGES_SIGNALED:
       server->user_changes_signaled = g_value_get_boolean(value);
       break;
@@ -207,6 +212,9 @@ get_property (GObject *object, guint property_id,
     break;
   case PROP_HTTP_SETS_VALUES:
     g_value_set_boolean(value, server->http_sets_values);
+    break;
+  case PROP_HTTP_SETS_EQUAL:
+    g_value_set_boolean(value, server->http_sets_equal);
     break;
   case PROP_USER_CHANGES_SIGNALED:
     g_value_set_boolean(value, server->user_changes_signaled);
@@ -259,6 +267,11 @@ http_server_class_init (HTTPServerClass *klass)
 			    "by HTTP requests, otherwise the user is only "
 			    "signaled but the values are unchanged.",
 			    TRUE, G_PARAM_READWRITE |G_PARAM_STATIC_STRINGS);
+  properties[PROP_HTTP_SETS_EQUAL]
+    =  g_param_spec_boolean("http-sets-equal", "HTTP sets equal values",
+			    "If true the changes are signaled even if "
+			    "the current value equals the new one.",
+			    TRUE, G_PARAM_READWRITE |G_PARAM_STATIC_STRINGS);
   properties[PROP_USER_CHANGES_SIGNALED]
     =  g_param_spec_boolean("user-changes-signaled", "Changes signaled",
 			    "Changes made by the user is signaled back.",
@@ -284,6 +297,7 @@ http_server_init(HTTPServer *server)
   server->http_root = NULL;
   server->root_file = NULL;
   server->http_sets_values = TRUE;
+  server->http_sets_equal = FALSE;
   server->user_changes_signaled = TRUE;
   g_datalist_init(&server->json_nodes);
   server->value_root = json_node_new(JSON_NODE_OBJECT);
@@ -880,6 +894,23 @@ json_response(HTTPServer *server, struct MHD_Connection * connection,
   return MHD_YES; 
 }
 
+/* Check if the of the value of the node equals the supplied value */
+static gboolean
+node_value_equal(JsonNode *node, const GValue *value)
+{
+  switch(json_node_get_value_type(node)) {
+  case G_TYPE_INT64:
+    return g_value_get_int64(value) == json_node_get_int(node);
+  case G_TYPE_DOUBLE:
+    return g_value_get_double(value) == json_node_get_double(node);
+  case G_TYPE_BOOLEAN:
+    return g_value_get_boolean(value) == json_node_get_boolean(node);
+  case G_TYPE_STRING:
+    return strcmp(g_value_get_string(value),json_node_get_string(node)) == 0;
+  }
+  return FALSE;
+}
+
 typedef struct SetArgData SetArgData;
 struct SetArgData
 {
@@ -929,10 +960,13 @@ static int set_arg_iterator(void *cls, enum MHD_ValueKind kind,
 	break;
       }
       g_assert(!G_VALUE_HOLDS(&gvalue, G_TYPE_INVALID));
-      if (ctxt->server->http_sets_values) {
-	json_node_set_value(node, &gvalue);
+      if (ctxt->server->http_sets_equal
+	  || !node_value_equal(node, &gvalue)) {
+	if (ctxt->server->http_sets_values) {
+	  json_node_set_value(node, &gvalue);
+	}
+	pending_change(ctxt->server, path, &gvalue);
       }
-      pending_change(ctxt->server, path, &gvalue);
       g_value_unset(&gvalue);
       
     }
@@ -1139,22 +1173,6 @@ copy_array(JsonArray *src,guint index, JsonNode *element_node,
   }
 }
 
-/* Check if the of the value of the node equals the supplied value */
-static gboolean
-node_value_equal(JsonNode *node, const GValue *value)
-{
-  switch(json_node_get_value_type(node)) {
-  case G_TYPE_INT64:
-    return g_value_get_int64(value) == json_node_get_int(node);
-  case G_TYPE_DOUBLE:
-    return g_value_get_double(value) == json_node_get_double(node);
-  case G_TYPE_BOOLEAN:
-    return g_value_get_boolean(value) == json_node_get_boolean(node);
-  case G_TYPE_STRING:
-    return strcmp(g_value_get_string(value),json_node_get_string(node)) == 0;
-  }
-  return FALSE;
-}
 
 static void
 copy_node(HTTPServer *server, const gchar *pathstr,
@@ -1168,7 +1186,7 @@ copy_node(HTTPServer *server, const gchar *pathstr,
       json_node_get_value (src, &src_value);
       g_value_init(&dest_value, json_node_get_value_type(dest));
       g_value_transform(&src_value, &dest_value);
-      if (!node_value_equal(dest, &dest_value)) {
+      if (server->http_sets_equal || !node_value_equal(dest, &dest_value)) {
 	if (server->http_sets_values) {
 	  json_node_set_value (dest, &dest_value);
 	}
